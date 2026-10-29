@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>fake_carla</name>
+  <version>0.1.0</version>
+  <description>Fake CARLA ROS bridge (camera, lidar, odometry, clock) for testing without the simulator</description>
+  <maintainer email="scottphan07@gmail.com">Scott</maintainer>
+  <license>TODO</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>rosgraph_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>carla_sensors</exec_depend>
+  <!-- Optional, not listed so the package builds without them: carla_msgs (lets controls drive
+       the fake car), carla_controls (for controls:=true). -->
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

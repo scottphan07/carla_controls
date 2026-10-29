@@ -1,0 +1,13 @@
+# Parameters for sensors_node. Edit and rebuild carla_sensors, or override at launch.
+sensors:
+  ros__parameters:
+    camera_encoding: "rgb8"     # "rgb8" or "passthrough" (keep the bridge's bgra8)
+
+    # Lidar filter (meters, relative to the lidar, which sits 2.4 m above the road).
+    # These defaults keep every point. Example ground removal: lidar_min_z: -2.2
+    lidar_min_range: 0.0
+    lidar_max_range: 100.0
+    lidar_min_z: -100.0
+    lidar_max_z: 100.0
+
+    sensor_timeout: 2.0         # [s, wall time] warn when a sensor goes quiet this long
