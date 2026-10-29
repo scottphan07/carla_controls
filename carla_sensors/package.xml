@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>carla_sensors</name>
+  <version>0.1.0</version>
+  <description>Sensor rig for the CARLA ego vehicle and a node that republishes its data on /sensors/*</description>
+  <maintainer email="scottphan07@gmail.com">Scott</maintainer>
+  <license>TODO</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
