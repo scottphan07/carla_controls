@@ -17,6 +17,7 @@
   <exec_depend>carla_ros_bridge</exec_depend>
   <exec_depend>carla_spawn_objects</exec_depend>
   <exec_depend>controls_msgs</exec_depend>
+  <exec_depend>carla_sensors</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>
