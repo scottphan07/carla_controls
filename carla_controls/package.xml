@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>carla_controls</name>
+  <version>0.4.0</version>
+  <description>Controls node between planning/perception and the CARLA ROS bridge</description>
+  <maintainer email="scottphan07@gmail.com">Scott</maintainer>
+  <license>TODO</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>carla_msgs</exec_depend>
+  <exec_depend>carla_ros_bridge</exec_depend>
+  <exec_depend>carla_spawn_objects</exec_depend>
+  <exec_depend>controls_msgs</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

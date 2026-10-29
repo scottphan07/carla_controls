@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+# colcon output, if the workspace is built here
+build/
+install/
+log/
+
+# Server/AWS setup stays out of this repo (instance IDs, IAM scripts)
+sim_server/
+.DS_Store
