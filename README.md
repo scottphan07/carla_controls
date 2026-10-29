@@ -53,45 +53,110 @@ Rules for both:
 
 Camera and lidar from the same tick carry the same `header.stamp`; match them on it.
 
-Minimal subscriber (save as `my_perception.py`, run with `python3 my_perception.py` after sourcing ROS):
+**Starting template** for any code that uses the sensor data (perception, data collection,
+logging, ...). It calls `process()` once per sim tick with that tick's camera image, lidar scan and
+car pose, already converted to numpy arrays and plain numbers. Put your code in `process()`.
+
+Save it as `sensor_listener.py` and run `python3 sensor_listener.py` on the sim box (or in the
+Docker fake sim) while the pipeline is running. It needs `message_filters`, which comes with ROS 2;
+if the import fails, `sudo apt install ros-humble-message-filters`.
 
 ```python
+import math
+
 import numpy as np
 import rclpy
+from message_filters import ApproximateTimeSynchronizer, Subscriber
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from sensor_msgs.msg import Image, PointCloud2
 from sensor_msgs_py import point_cloud2
 
 
-class MyPerception(Node):
+# ---- conversions: ROS message -> plain Python / numpy ---------------------------------------
+def image_to_numpy(msg: Image) -> np.ndarray:
+    """rgb8 image -> H x W x 3 uint8 array (600 x 800 x 3)."""
+    return np.frombuffer(msg.data, np.uint8).reshape(msg.height, msg.width, 3)
+
+
+def cloud_to_numpy(msg: PointCloud2) -> np.ndarray:
+    """Lidar scan -> N x 4 float32 array of x, y, z, intensity (meters, relative to the lidar)."""
+    return point_cloud2.read_points_numpy(msg, field_names=("x", "y", "z", "intensity"))
+
+
+def odometry_to_pose(msg: Odometry):
+    """Odometry -> (x, y, yaw, speed) in the map frame: meters, radians, m/s."""
+    p, q, v = msg.pose.pose.position, msg.pose.pose.orientation, msg.twist.twist.linear
+    yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+    return p.x, p.y, yaw, math.hypot(v.x, v.y)
+
+
+def stamp_to_seconds(stamp) -> float:
+    return stamp.sec + stamp.nanosec * 1e-9
+
+
+# ---- the node ---------------------------------------------------------------------------------
+class SensorListener(Node):
+    """Calls process() once per sim tick with that tick's camera image, lidar scan and car pose."""
+
     def __init__(self):
-        super().__init__("my_perception",
+        super().__init__("sensor_listener",
                          parameter_overrides=[Parameter("use_sim_time", Parameter.Type.BOOL, True)])
-        self.create_subscription(Image, "/sensors/front_camera/image", self.on_image, 10)
-        self.create_subscription(PointCloud2, "/sensors/lidar", self.on_lidar, 10)
+        # One subscriber per topic; the synchronizer waits until it has all three from the same
+        # tick (same timestamp, within 10 ms) and then calls on_tick with them together.
+        subscribers = [
+            Subscriber(self, Image, "/sensors/front_camera/image"),
+            Subscriber(self, PointCloud2, "/sensors/lidar"),
+            Subscriber(self, Odometry, "/carla/ego_vehicle/odometry"),
+        ]
+        self.sync = ApproximateTimeSynchronizer(subscribers, queue_size=10, slop=0.01)
+        self.sync.registerCallback(self.on_tick)
 
-    def on_image(self, msg: Image):
-        rgb = np.frombuffer(msg.data, np.uint8).reshape(msg.height, msg.width, 3)   # 600 x 800 x 3
-        self.get_logger().info(f"image {rgb.shape} at t={msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}")
+    def on_tick(self, image: Image, cloud: PointCloud2, odom: Odometry):
+        self.process(
+            t=stamp_to_seconds(image.header.stamp),
+            rgb=image_to_numpy(image),
+            points=cloud_to_numpy(cloud),
+            pose=odometry_to_pose(odom),
+        )
 
-    def on_lidar(self, msg: PointCloud2):
-        pts = point_cloud2.read_points_numpy(msg, field_names=("x", "y", "z", "intensity"))  # N x 4
-        self.get_logger().info(f"lidar {len(pts)} points")
+    def process(self, t, rgb, points, pose):
+        """Your code goes here. Runs 20 times per sim second.
+
+        t       sim time [s]
+        rgb     600 x 800 x 3 uint8 camera image
+        points  N x 4 float32 lidar points: x forward, y left, z up, intensity (road at z ~ -2.4)
+        pose    (x, y, yaw, speed) of the car in the map frame
+        """
+        x, y, yaw, speed = pose
+        self.get_logger().info(
+            f"t={t:.2f}s  image {rgb.shape}  lidar {len(points)} pts  "
+            f"car at ({x:.1f}, {y:.1f}) heading {math.degrees(yaw):.0f} deg, {speed:.1f} m/s")
 
 
-rclpy.init()
-rclpy.spin(MyPerception())
+def main():
+    rclpy.init()
+    rclpy.spin(SensorListener())
+
+
+if __name__ == "__main__":
+    main()
 ```
 
-For the camera image and lidar scan of the same tick in one callback, use `message_filters`:
+What each part does:
 
-```python
-from message_filters import Subscriber, TimeSynchronizer
-sync = TimeSynchronizer([Subscriber(self, Image, "/sensors/front_camera/image"),
-                         Subscriber(self, PointCloud2, "/sensors/lidar")], queue_size=10)
-sync.registerCallback(self.on_frame)          # def on_frame(self, image, cloud): ...
-```
+- **Conversion helpers** (`image_to_numpy`, `cloud_to_numpy`, `odometry_to_pose`) turn ROS messages
+  into numpy arrays and plain numbers. They work on their own, so you can reuse them in other nodes.
+- **`ApproximateTimeSynchronizer`** waits until it has the camera image, lidar scan and odometry
+  from the same tick (timestamps within 10 ms), then calls `on_tick` with all three. You never
+  get a camera frame paired with a lidar scan from a different moment.
+- **`process()`** is the only part you need to change. The template just logs one line per tick:
+  `t=87.05s  image (600, 800, 3)  lidar 8732 pts  car at (152.3, 58.1) heading 90 deg, 4.2 m/s`.
+
+To use fewer or different topics, edit the `subscribers` list and the `on_tick` arguments to match
+(same order). If you only need one topic, skip the synchronizer and use a plain
+`self.create_subscription(Image, "/sensors/front_camera/image", self.on_image, 10)`.
 
 Check it from the command line:
 
