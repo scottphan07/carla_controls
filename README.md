@@ -2,8 +2,9 @@
 
 A ROS 2 node that sits between planning/perception and CARLA. CARLA is reached
 through the [CARLA ROS bridge](https://github.com/carla-simulator/ros-bridge).
-The control logic is still placeholder code; TODO comments in each file list what's
-left to design.
+This repo is the wrapper only: the ROS/CARLA plumbing is done, and the control
+algorithms (`speed_control.py`, `steering_control.py`, `stop_behavior.py`) are stubs
+marked TODO that return a neutral command, so the car stays still until they're written.
 
 ```
  planning ──── /planning/target (ControlTarget) ─────────┐
@@ -108,6 +109,6 @@ The team shares one CARLA 0.9.16 + ROS 2 Humble machine on AWS and takes turns r
 - **Timing:** the bridge publishes odometry once per sim tick, and the node runs the
   control loop in that callback, so controls runs exactly once per tick. Everything uses
   sim time, so planning must stamp its messages with `use_sim_time:=true`.
-- **Missing data:** a `ControlTarget` older than 0.5 s of sim time counts as missing, and the
-  car brakes. Planning should publish every tick (20 Hz).
+- **Missing data:** the car brakes until the first `ControlTarget` arrives. Planning should
+  publish every tick (20 Hz); a staleness check is a TODO in `stop_behavior.py`.
 - **Obstacles:** `sensor_msgs/Range` with `range: .inf` means nothing ahead.

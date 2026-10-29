@@ -14,7 +14,7 @@ class Controller:
     def __init__(self, dt: float):
         self.speed = SpeedController(dt)
         self.steering = SteeringController(dt)
-        self.emergency_stop = False  # TODO: decide who can set / clear this
+        self.emergency_stop = False  # set from /controls/emergency_stop
 
     def step(
         self,
@@ -25,7 +25,7 @@ class Controller:
         stop_reason = check_stop(state, plan, perception, self.emergency_stop)
 
         if stop_reason is not None:
-            command = Command(throttle=0.0, brake=1.0)  # TODO: braking strength per reason
+            command = Command(throttle=0.0, brake=1.0)
         else:
             throttle, brake = self.speed.compute(state, plan)
             steer = self.steering.compute(state, plan)
