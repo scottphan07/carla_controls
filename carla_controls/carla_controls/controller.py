@@ -31,7 +31,9 @@ class Controller:
         stop_reason = check_stop(state, plan, perception, self.emergency_stop)
 
         if stop_reason is not None:
-            command = Command(throttle=0.0, brake=1.0)
+            self.speed.reset()
+            self.steering.reset()
+            command = Command(throttle=0.0, steer=0.0, brake=1.0)
         else:
             throttle, brake = self.speed.compute(state, plan)
             steer = self.steering.compute(state, plan)

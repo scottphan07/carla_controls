@@ -16,6 +16,9 @@ class SteeringController:
 
         self.prev_steer = 0.0
 
+    def reset(self):
+        self.prev_steer = 0.0
+
     def compute(self, state: VehicleState, plan: PlanningInput) -> float:
 
         # Direction from vehicle to target

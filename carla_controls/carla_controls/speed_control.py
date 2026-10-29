@@ -1,25 +1,26 @@
 """Speed control: vehicle state + planning target -> (throttle, brake).
-
-TODO: implement. Return values in [0, 1]; controller.py clamps them and never
-sends throttle and brake together.
 """
 from .messages import PlanningInput, VehicleState
 
 
 class SpeedController:
     def __init__(self, dt: float):
-        self.dt = dt  # Tick length [s]
-
-        '''***Have to experiment values o kp_throttle, 
-        kp_brake, and deadband in Carla***'''
-        # Proportional gains
-        self.kp_throttle = 0.3
-        self.kp_brake = 0.4
-        # Speed tolerance in m/s
+        self.dt = dt
+        ''' May have to change based on CARLASim'''
+        self.kp_throttle = 0.1
+        self.kp_brake = 0.1
         self.deadband = 0.1
 
-    def compute(self, state, plan):
+        # Throttle rate limiting
+        self.max_change_per_second = 1.0
+        self.prev_throttle = 0.0
+
+    def reset(self):
+        self.prev_throttle = 0.0
+
+    def compute(self, state: VehicleState, plan: PlanningInput) -> tuple:
         error = plan.desired_speed - state.speed
+
         throttle = 0.0
         brake = 0.0
 
@@ -28,6 +29,7 @@ class SpeedController:
                 throttle = min(1.0, self.kp_throttle * error)
             else:
                 brake = min(1.0, self.kp_brake * abs(error))
+
         # Limit how quickly throttle increases
         max_change = self.max_change_per_second * self.dt
 
@@ -35,4 +37,9 @@ class SpeedController:
             throttle,
             self.prev_throttle + max_change
         )
+
         self.prev_throttle = throttle
+
+        # Always return both values
+        return throttle, brake
+
