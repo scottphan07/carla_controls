@@ -8,7 +8,13 @@ from .messages import Command, ControlsOutput, PerceptionInput, PlanningInput, V
 from .speed_control import SpeedController
 from .steering_control import SteeringController
 from .stop_behavior import check_stop
+import math
 
+
+def clamp(value, low, high):
+        if not math.isinfinite(value):
+            raise ValueError("Invalid control command")
+        return max(low, min(high, value))  
 
 class Controller:
     def __init__(self, dt: float):
@@ -25,7 +31,9 @@ class Controller:
         stop_reason = check_stop(state, plan, perception, self.emergency_stop)
 
         if stop_reason is not None:
-            command = Command(throttle=0.0, brake=1.0)
+            self.speed.reset()
+            self.steering.reset()
+            command = Command(throttle=0.0, steer=0.0, brake=1.0)
         else:
             throttle, brake = self.speed.compute(state, plan)
             steer = self.steering.compute(state, plan)
@@ -39,3 +47,4 @@ class Controller:
             command.throttle = 0.0  # never throttle and brake together
 
         return ControlsOutput(state=state, command=command, stop_reason=stop_reason)
+
