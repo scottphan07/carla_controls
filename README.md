@@ -3,10 +3,9 @@
 ROS 2 packages that sit between the team's code and CARLA: **sensors** gets camera and
 lidar data out of CARLA, **controls** takes driving targets in and drives the car. CARLA is reached
 through the [CARLA ROS bridge](https://github.com/carla-simulator/ros-bridge).
-Both are wrappers only: the ROS/CARLA plumbing is done, and the control
-algorithms (`speed_control.py`, `steering_control.py`, `stop_behavior.py`) are stubs
-marked TODO that return a neutral command, so the car stays still until they're written.
-The sensors node converts the camera to rgb8 and can filter the lidar (off by default).
+Controls has first versions of speed control (P with deadband and throttle rate limit), steering
+(heading to the target point) and stop behavior; tuning against CARLA is still to do. The sensors
+node converts the camera to rgb8 and can filter the lidar (off by default).
 
 ```
  CARLA ROS bridge ── /carla/ego_vehicle/rgb_front/*, /lidar ──► sensors_node ── /sensors/front_camera/*, /sensors/lidar ──► perception
@@ -57,24 +56,27 @@ Needs ROS 2 Humble, the CARLA ROS bridge (which provides `carla_msgs`, `carla_ro
 installed, and CARLA is always running as the `carla` service.
 
 ```bash
-cd ~/ros2_ws && colcon build --packages-select controls_msgs carla_sensors carla_controls && source install/setup.bash
+cd ~/ros2_ws && colcon build --packages-select controls_msgs carla_sensors carla_controls fake_carla && source install/setup.bash
 
 # Terminal 1: bridge (synchronous, 0.05 s ticks) + ego vehicle with our sensors + sensors node + controls
 ros2 launch carla_controls sim.launch.py            # town:=Town03, sensors:=false
 # Sensors only (no controls): ros2 launch carla_controls sim.launch.py controls:=false wait_for_control:=False
 
-# Terminal 2: stand-in for planning (drive toward x=50, y=0 at 5 m/s)
-ros2 topic pub -r 20 /planning/target controls_msgs/msg/ControlTarget \
-    "{header: {stamp: now}, desired_speed: 5.0, target_x: 50.0, target_y: 0.0}"
+# Terminal 2: stand-in for planning + perception: drive 30 m straight ahead, stop, print PASS/FAIL
+ros2 run fake_carla drive_test                      # --distance 50 --speed 8 --no-lidar
 ```
 
-Pick a target near the car's spawn point. The car spawns at a random point unless you add a
+Controls only drives when it gets a planning target **and** an obstacle distance, both stamped with
+sim time and less than 0.5 s old, so a plain `ros2 topic pub` (wall-clock stamps, no perception)
+leaves the car braking with `stop_reason: missing_data`. `drive_test` publishes both correctly
+(see [fake_carla/README.md](fake_carla/README.md)). Watch `ros2 topic echo /controls/status` to see
+what controls is doing and why it is stopping.
+
+The car spawns at a random point unless you add a
 `"spawn_point": {"x": ..., "y": ..., "z": ..., "roll": 0, "pitch": 0, "yaw": ...}` entry to the
 `ego_vehicle` object in `carla_sensors/config/objects.json` (ROS coordinates; read a good one off
-`ros2 topic echo /carla/ego_vehicle/odometry --once`). `stamp: now` gives a wall-clock time, so the
-missing-data check is effectively off for this stand-in; the real planning node should
-stamp with sim time. Watch `ros2 topic echo /controls/status`
-to see what controls is doing and why it is stopping.
+`ros2 topic echo /carla/ego_vehicle/odometry --once`). Pick one with straight road ahead for
+`drive_test`.
 
 Ctrl-C in terminal 1 stops the bridge and removes the car; CARLA keeps running for the next person.
 
@@ -89,6 +91,8 @@ a parked car), so you can run the sensors and controls nodes on a laptop. With D
 ```
 
 `check_sensors` prints OK/FAIL for each `/sensors/*` topic and saves a camera snapshot to `out/`.
+To test driving: `./docker/fake_sim.sh controls:=true wait_for_control:=true cruise_speed:=0.0`, then
+`./docker/ros.sh ros2 run fake_carla drive_test`.
 Details in [fake_carla/README.md](fake_carla/README.md).
 
 ## Sensor data
@@ -137,6 +141,8 @@ The team shares one CARLA 0.9.16 + ROS 2 Humble machine on AWS and takes turns r
 - **Timing:** the bridge publishes odometry once per sim tick, and the node runs the
   control loop in that callback, so controls runs exactly once per tick. Everything uses
   sim time, so planning must stamp its messages with `use_sim_time:=true`.
-- **Missing data:** the car brakes until the first `ControlTarget` arrives. Planning should
-  publish every tick (20 Hz); a staleness check is a TODO in `stop_behavior.py`.
-- **Obstacles:** `sensor_msgs/Range` with `range: .inf` means nothing ahead.
+- **Missing data:** the car brakes unless it has a `ControlTarget` and an obstacle `Range`, each
+  stamped with sim time and at most 0.5 s old. Planning and perception should publish every tick (20 Hz).
+- **Obstacles:** `sensor_msgs/Range` on `/perception/obstacle_distance`: gap in meters from our
+  front bumper to the nearest thing in our lane; `range: .inf` means nothing ahead. Controls stops
+  under 5 m.

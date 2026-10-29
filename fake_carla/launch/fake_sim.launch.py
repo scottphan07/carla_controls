@@ -6,11 +6,13 @@
     ros2 launch fake_carla fake_sim.launch.py controls:=true wait_for_control:=true   # lockstep, like sim.launch.py
 
 Then, in another terminal:  ros2 run fake_carla check_sensors --save /tmp/front_camera.png
+To drive with controls:      ros2 launch fake_carla fake_sim.launch.py controls:=true wait_for_control:=true cruise_speed:=0.0
+                             ros2 run fake_carla drive_test
 
 controls:=true needs carla_msgs, controls_msgs and carla_controls built in the workspace (the
 Docker setup in docker/ does this). With controls on, controls_node brakes until something
-publishes /planning/target, and its speed/steering stubs output zero, so the car will sit still
-until those are written; that's expected.
+publishes /planning/target and /perception/obstacle_distance stamped with sim time; drive_test
+does both.
 """
 import os
 

@@ -2,7 +2,7 @@
 <package format="3">
   <name>fake_carla</name>
   <version>0.1.0</version>
-  <description>Fake CARLA ROS bridge (camera, lidar, odometry, clock) for testing without the simulator</description>
+  <description>Fake CARLA ROS bridge, plus check_sensors and drive_test tools, for testing with or without the simulator</description>
   <maintainer email="scottphan07@gmail.com">Scott</maintainer>
   <license>TODO</license>
 
@@ -18,6 +18,8 @@
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>carla_sensors</exec_depend>
+  <exec_depend>controls_msgs</exec_depend>
+  <exec_depend>sensor_msgs_py</exec_depend>
   <!-- Optional, not listed so the package builds without them: carla_msgs (lets controls drive
        the fake car), carla_controls (for controls:=true). -->
 

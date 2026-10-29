@@ -19,5 +19,6 @@ setup(
     entry_points={"console_scripts": [
         "fake_bridge = fake_carla.fake_bridge:main",
         "check_sensors = fake_carla.check_sensors:main",
+        "drive_test = fake_carla.drive_test:main",
     ]},
 )

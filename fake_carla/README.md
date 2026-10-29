@@ -17,6 +17,26 @@ lane lines, walls on both sides, and a red parked car ahead (it moves further ah
 Until a control command arrives, the car cruises straight at `cruise_speed` (5 m/s), so the
 sensors have something changing to look at.
 
+## Driving test: `drive_test`
+
+`drive_test` stands in for planning and perception, so `controls_node` can drive the car on its own:
+it sets a goal straight ahead of where the car starts, publishes `/planning/target` (stamped with sim
+time, which controls requires), asks for speed 0 within 3 m of the goal, and publishes
+`/perception/obstacle_distance` from the lidar (gap from our front bumper to the nearest thing in
+our lane). It prints progress every second and ends with:
+
+- `PASS: stopped 1.6 m from the goal ...` — controls drove there and stopped
+- `STOPPED FOR OBSTACLE ...` — something was in the lane and controls stopped for it (also good)
+- `FAIL ...` — timed out, with the last `stop_reason` from `/controls/status`
+
+```bash
+ros2 run fake_carla drive_test                        # 30 m ahead at 5 m/s
+ros2 run fake_carla drive_test --distance 60          # fake world: runs into the parked car at 40 m
+ros2 run fake_carla drive_test --speed 8 --no-lidar   # treat the lane as clear
+```
+
+It works the same against the fake bridge and against real CARLA.
+
 ## Run it on a Mac or PC (Docker)
 
 Needs [Docker Desktop](https://www.docker.com/products/docker-desktop/). From the repo root:
@@ -30,8 +50,8 @@ Needs [Docker Desktop](https://www.docker.com/products/docker-desktop/). From th
 size, fields), and saves the camera image to `out/front_camera.png`. More:
 
 ```bash
-./docker/fake_sim.sh controls:=true                    # also run controls_node
-./docker/fake_sim.sh controls:=true wait_for_control:=true   # lockstep, like the real sim.launch.py
+./docker/fake_sim.sh controls:=true wait_for_control:=true cruise_speed:=0.0   # + controls_node
+./docker/ros.sh ros2 run fake_carla drive_test         # then drive it
 ./docker/ros.sh ros2 topic hz /sensors/lidar
 ./docker/ros.sh bash                                   # shell inside, ROS sourced
 ```
@@ -72,8 +92,11 @@ cd fake_carla && python3 -m pytest test/
 | `fake_carla/fake_bridge.py` | ROS node publishing the bridge's topics from the scene |
 | `fake_carla/checks.py` | Format checks for `/sensors/*` messages (plain Python) |
 | `fake_carla/check_sensors.py` | ROS tool: listen, run the checks, print OK/FAIL, save a snapshot |
+| `fake_carla/drive_logic.py` | Goal, stop-at-goal and lidar obstacle distance for `drive_test` (plain Python) |
+| `fake_carla/drive_test.py` | ROS tool: stand-in planning + perception, drives the car with controls, PASS/FAIL |
 | `launch/fake_sim.launch.py` | Fake bridge + sensors (+ controls) |
 | `test/test_scene.py` | Unit tests, including fake data through `carla_sensors`' processing |
+| `test/test_drive_logic.py` | Unit tests for `drive_test`'s logic |
 
 It's a test double, not a simulator: no traffic, one straight road, simplified physics. Use the
 real CARLA box for anything about driving behavior.
