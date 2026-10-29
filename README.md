@@ -205,54 +205,142 @@ time, at most 0.5 s old.** Otherwise it brakes and reports `stop_reason: missing
 `/controls/status`. Stop reasons, in priority order: `emergency_stop`, `missing_data`, `obstacle`,
 `target_speed_zero`; empty = driving.
 
-Minimal planner + perception stand-in (drives toward a point 20 m ahead; the lane is reported
-clear):
+**Starting template** for any code that drives the car (planning, scripted tests, a perception
+node that also sends targets, ...). It calls `decide()` once per sim tick with the car's pose; you
+return a `Decision` (speed, target point, obstacle distance, brake), and the template publishes it
+to controls with the right sim-time stamps. Put your code in `decide()`.
+
+Save it as `driver.py` and run `python3 driver.py` on the sim box (or in the Docker fake sim) while
+`sim.launch.py` is running with controls on. It needs `controls_msgs`, which is in this repo's
+workspace (`source ~/ros2_ws/install/setup.bash`).
 
 ```python
 import math
+from dataclasses import dataclass
+
 import rclpy
-from controls_msgs.msg import ControlTarget
+from controls_msgs.msg import ControlStatus, ControlTarget
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from sensor_msgs.msg import Range
+from std_msgs.msg import Bool
 
 
-class MyPlanner(Node):
+# ---- what you decide each tick ----------------------------------------------------------------
+@dataclass
+class Decision:
+    desired_speed: float                     # [m/s]; <= 0.1 means stop
+    target_x: float                          # point to drive toward, map frame [m]
+    target_y: float
+    obstacle_distance: float = math.inf      # gap from our front bumper to the nearest thing in our lane [m]
+    brake: bool = False                      # True = stop now
+
+
+# ---- conversions: plain Python -> ROS message -------------------------------------------------
+def odometry_to_pose(msg: Odometry):
+    """Odometry -> (x, y, yaw, speed) in the map frame: meters, radians, m/s."""
+    p, q, v = msg.pose.pose.position, msg.pose.pose.orientation, msg.twist.twist.linear
+    yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+    return p.x, p.y, yaw, math.hypot(v.x, v.y)
+
+
+def make_target(stamp, d: Decision) -> ControlTarget:
+    msg = ControlTarget()
+    msg.header.stamp = stamp                 # sim time, or controls ignores it as stale
+    msg.header.frame_id = "map"
+    msg.desired_speed = float(d.desired_speed)
+    msg.target_x, msg.target_y = float(d.target_x), float(d.target_y)
+    msg.has_target_yaw = False
+    msg.brake_request = d.brake
+    return msg
+
+
+def make_range(stamp, distance: float) -> Range:
+    msg = Range()
+    msg.header.stamp = stamp
+    msg.header.frame_id = "ego_vehicle"
+    msg.range = float(distance)
+    return msg
+
+
+# ---- the node ---------------------------------------------------------------------------------
+class Driver(Node):
+    """Calls decide() once per sim tick and sends the result to controls_node."""
+
     def __init__(self):
-        super().__init__("my_planner",
+        super().__init__("driver",
                          parameter_overrides=[Parameter("use_sim_time", Parameter.Type.BOOL, True)])
         self.target_pub = self.create_publisher(ControlTarget, "/planning/target", 10)
         self.range_pub = self.create_publisher(Range, "/perception/obstacle_distance", 10)
+        self.estop_pub = self.create_publisher(Bool, "/controls/emergency_stop", 10)
         self.create_subscription(Odometry, "/carla/ego_vehicle/odometry", self.on_odometry, 10)
+        self.create_subscription(ControlStatus, "/controls/status", self.on_status, 10)
+        self.status = None                   # latest ControlStatus from controls_node
+        self.goal = None
 
-    def on_odometry(self, odom: Odometry):        # once per sim tick
-        p, q = odom.pose.pose.position, odom.pose.pose.orientation
-        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+    def on_status(self, msg: ControlStatus):
+        self.status = msg
 
-        target = ControlTarget()
-        target.header.stamp = odom.header.stamp   # sim time
-        target.header.frame_id = "map"
-        target.desired_speed = 5.0
-        target.target_x = p.x + 20.0 * math.cos(yaw)
-        target.target_y = p.y + 20.0 * math.sin(yaw)
-        self.target_pub.publish(target)
+    def on_odometry(self, odom: Odometry):  # once per sim tick
+        t = odom.header.stamp.sec + odom.header.stamp.nanosec * 1e-9
+        d = self.decide(t, odometry_to_pose(odom))
+        # Reuse the odometry timestamp: it's this tick's sim time.
+        self.target_pub.publish(make_target(odom.header.stamp, d))
+        self.range_pub.publish(make_range(odom.header.stamp, d.obstacle_distance))
 
-        clear = Range()
-        clear.header.stamp = odom.header.stamp
-        clear.header.frame_id = "ego_vehicle"
-        clear.range = math.inf                    # a real perception node puts the measured gap here
-        self.range_pub.publish(clear)
+    def emergency_stop(self, on: bool = True):
+        self.estop_pub.publish(Bool(data=on))
+
+    def decide(self, t, pose) -> Decision:
+        """Your code goes here. Runs 20 times per sim second.
+
+        t      sim time [s]
+        pose   (x, y, yaw, speed) of the car in the map frame
+        self.status.stop_reason tells you why controls is stopping ("" = driving).
+
+        Example: drive to a point 20 m ahead of where the car started, then stop there.
+        """
+        x, y, yaw, speed = pose
+        if self.goal is None:
+            self.goal = (x + 20.0 * math.cos(yaw), y + 20.0 * math.sin(yaw))
+        gx, gy = self.goal
+        arrived = math.hypot(gx - x, gy - y) < 3.0
+        reason = self.status.stop_reason if self.status else "no status yet"
+        self.get_logger().info(f"t={t:.2f}s  speed {speed:.1f} m/s  to goal "
+                               f"{math.hypot(gx - x, gy - y):.1f} m  controls: {reason or 'driving'}",
+                               throttle_duration_sec=1.0)
+        return Decision(desired_speed=0.0 if arrived else 5.0, target_x=gx, target_y=gy,
+                        brake=arrived)
 
 
-rclpy.init()
-rclpy.spin(MyPlanner())
+def main():
+    rclpy.init()
+    rclpy.spin(Driver())
+
+
+if __name__ == "__main__":
+    main()
 ```
 
-This example never stops on its own (the target keeps moving ahead); Ctrl-C it and the car brakes
-within 0.5 s. For a ready-made test that drives to a fixed goal, stops, uses the lidar for
-obstacles and prints PASS/FAIL, run `ros2 run fake_carla drive_test` (see
-[fake_carla/README.md](fake_carla/README.md)).
+What each part does:
+
+- **`Decision`** is everything controls needs from you each tick: `desired_speed`, the point to
+  drive toward, `obstacle_distance` (leave it at `math.inf` until you have perception; a real
+  perception node would fill it from the lidar), and `brake`.
+- **`make_target` / `make_range`** turn a `Decision` into the two ROS messages. Both are stamped with
+  the odometry message's timestamp, which is this tick's sim time, so controls never treats them as
+  stale.
+- **`decide()`** is the only part you need to change. The example drives to a point 20 m ahead of
+  where the car started and stops there, logging once a second:
+  `t=91.00s  speed 3.1 m/s  to goal 11.6 m  controls: driving`.
+- **`self.status`** is controls' latest `ControlStatus`; `self.status.stop_reason` says why it's
+  braking (`missing_data`, `obstacle`, `target_speed_zero`, `emergency_stop`; empty = driving).
+- **`self.emergency_stop(True)`** stops the car from your code; `self.emergency_stop(False)` releases it.
+
+If your node stops publishing (Ctrl-C, crash), controls brakes within 0.5 s. For a ready-made test
+that also uses the lidar for obstacles and prints PASS/FAIL, run `ros2 run fake_carla drive_test`
+(see [fake_carla/README.md](fake_carla/README.md)).
 
 Check it from the command line:
 
