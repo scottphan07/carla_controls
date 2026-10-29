@@ -1,4 +1,5 @@
 __pycache__/
+.pytest_cache/
 *.pyc
 *.egg-info/
 .venv/
@@ -10,3 +11,6 @@ log/
 # Server/AWS setup stays out of this repo (instance IDs, IAM scripts)
 sim_server/
 .DS_Store
+
+# snapshots from the fake sim (docker/ros.sh ... --save /repo/out/...)
+out/

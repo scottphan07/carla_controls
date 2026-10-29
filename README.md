@@ -6,7 +6,7 @@ through the [CARLA ROS bridge](https://github.com/carla-simulator/ros-bridge).
 Both are wrappers only: the ROS/CARLA plumbing is done, and the control
 algorithms (`speed_control.py`, `steering_control.py`, `stop_behavior.py`) are stubs
 marked TODO that return a neutral command, so the car stays still until they're written.
-The sensors node passes data straight through; its processing hooks are TODO too.
+The sensors node converts the camera to rgb8 and can filter the lidar (off by default).
 
 ```
  CARLA ROS bridge ── /carla/ego_vehicle/rgb_front/*, /lidar ──► sensors_node ── /sensors/front_camera/*, /sensors/lidar ──► perception
@@ -25,7 +25,7 @@ clip to valid values → publish.
 
 ## Layout
 
-This repo holds three ROS 2 packages. Clone it into your workspace's `src/` folder.
+This repo holds three ROS 2 packages, plus `fake_carla` for testing without the simulator. Clone it into your workspace's `src/` folder.
 
 | Path | What it is |
 |---|---|
@@ -40,7 +40,12 @@ This repo holds three ROS 2 packages. Clone it into your workspace's `src/` fold
 | `carla_controls/launch/controls.launch.py` | Starts the node on sim time |
 | `carla_controls/launch/sim.launch.py` | Starts bridge + ego vehicle + sensors + controls in one command |
 | `carla_sensors/config/objects.json` | Ego vehicle and its sensors (the rig) |
-| `carla_sensors/carla_sensors/sensors_node.py` | Republishes camera + lidar on `/sensors/*`, with processing hooks |
+| `carla_sensors/carla_sensors/sensors_node.py` | Republishes camera + lidar on `/sensors/*`; warns when a sensor goes quiet |
+| `carla_sensors/carla_sensors/processing.py` | Camera conversion, lidar filter, health watchdog (plain numpy, no ROS) |
+| `carla_sensors/config/sensors_params.yaml` | Sensors node settings: camera encoding, lidar filter, timeout |
+| `carla_sensors/test/test_processing.py` | Unit tests: `cd carla_sensors && python3 -m pytest test/` |
+| `fake_carla/` | Fake CARLA bridge + `check_sensors` tool, for running everything without CARLA ([README](fake_carla/README.md)) |
+| `docker/` | Runs the fake bridge + our nodes in Docker on a laptop (`./docker/fake_sim.sh`) |
 | `carla_sensors/launch/sensors.launch.py` | Starts the sensors node on sim time |
 
 In `carla_controls`, only `controls_node.py` imports ROS. The rest is plain Python.
@@ -73,6 +78,19 @@ to see what controls is doing and why it is stopping.
 
 Ctrl-C in terminal 1 stops the bridge and removes the car; CARLA keeps running for the next person.
 
+## Testing without CARLA
+
+`fake_carla` publishes the same topics as the CARLA ROS bridge from a tiny fake world (road, walls,
+a parked car), so you can run the sensors and controls nodes on a laptop. With Docker Desktop:
+
+```bash
+./docker/fake_sim.sh                     # terminal 1: fake bridge + sensors_node (add controls:=true for controls)
+./docker/ros.sh ros2 run fake_carla check_sensors --save /repo/out/front_camera.png   # terminal 2
+```
+
+`check_sensors` prints OK/FAIL for each `/sensors/*` topic and saves a camera snapshot to `out/`.
+Details in [fake_carla/README.md](fake_carla/README.md).
+
 ## Sensor data
 
 The sensor rig is `carla_sensors/config/objects.json`. The bridge publishes each sensor there as
@@ -81,9 +99,9 @@ republishes the camera and lidar on `/sensors/*`; perception should subscribe to
 
 | Topic | Type | Sensor |
 |---|---|---|
-| `/sensors/front_camera/image`, `.../camera_info` | `sensor_msgs/Image`, `CameraInfo` | Front camera, 800×600, 90° (from `sensors_node`) |
-| `/sensors/lidar` | `sensor_msgs/PointCloud2` | 32-channel lidar, 50 m (from `sensors_node`) |
-| `/carla/ego_vehicle/rgb_front/image`, `/carla/ego_vehicle/lidar` | as above | Raw bridge topics that `sensors_node` reads |
+| `/sensors/front_camera/image`, `.../camera_info` | `sensor_msgs/Image`, `CameraInfo` | Front camera, 800×600, 90°, `rgb8` (from `sensors_node`) |
+| `/sensors/lidar` | `sensor_msgs/PointCloud2` | 32-channel lidar, 50 m, x/y/z/intensity, filtered per `sensors_params.yaml` (from `sensors_node`) |
+| `/carla/ego_vehicle/rgb_front/image`, `/carla/ego_vehicle/lidar` | as above | Raw bridge topics that `sensors_node` reads (image is `bgra8`) |
 | `/carla/ego_vehicle/odometry` | `nav_msgs/Odometry` | Ground-truth pose and velocity (controls uses this) |
 | `/carla/ego_vehicle/speedometer` | `std_msgs/Float32` | Speed, m/s |
 | `/carla/ego_vehicle/vehicle_control_cmd` | `carla_msgs/CarlaEgoVehicleControl` | **Input**: throttle/steer/brake (from controls) |
@@ -97,7 +115,8 @@ if you need them (sensor types are listed in the CARLA ros-bridge docs). Ways to
 - **Timing:** the bridge waits for a control command before each tick, so with controls off
   the sensors stop publishing. Launch with `wait_for_control:=False` to test sensors alone.
 - **In a node:** subscribe like `sensors_node.py` does, launch with `use_sim_time: True`, and
-  convert images with `cv_bridge` (`CvBridge().imgmsg_to_cv2(msg, "bgr8")`).
+  convert images with `cv_bridge` (`CvBridge().imgmsg_to_cv2(msg, "rgb8")`) or
+  `np.frombuffer(msg.data, np.uint8).reshape(msg.height, msg.width, 3)`.
 - **Record and copy off the box:**
   `ros2 bag record -o run1 /sensors/front_camera/image /sensors/lidar /carla/ego_vehicle/odometry /controls/status`,
   then on your laptop `scp -r carla-sim:~/run1 .`
