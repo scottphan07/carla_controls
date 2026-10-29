@@ -22,9 +22,213 @@ node converts the camera to rgb8 and can filter the lidar (off by default).
 Inside the node, each tick: stop behavior → speed control + steering control →
 clip to valid values → publish.
 
+## Connecting to the pipeline
+
+Other code talks to this pipeline only through ROS 2 topics; nothing needs to import these packages
+or know about CARLA. There are two endpoints:
+
+| Endpoint | You... | Topics |
+|---|---|---|
+| **1. Sensor data out** | subscribe | `/sensors/front_camera/image`, `/sensors/front_camera/camera_info`, `/sensors/lidar`, `/carla/ego_vehicle/odometry` |
+| **2. Driving commands in** | publish | `/planning/target`, `/perception/obstacle_distance`, `/controls/emergency_stop` (and subscribe to `/controls/status` for feedback) |
+
+Rules for both:
+
+- **Use sim time.** Start your node with `use_sim_time: True` (examples below). CARLA's clock runs
+  on `/clock`, not the wall clock, and every message here is stamped with it.
+- **Same machine, same ROS domain.** Your node runs where the pipeline runs: on the sim box, or in
+  the Docker fake sim on a laptop. Don't change `ROS_DOMAIN_ID`.
+- **Everything ticks at 20 Hz** (one message per topic per 0.05 s of sim time).
+- **ROS axes and SI units:** frame `map`, x forward, y left, yaw counter-clockwise in radians, meters,
+  m/s.
+
+### Endpoint 1: sensor data out
+
+| Topic | Type | What you get |
+|---|---|---|
+| `/sensors/front_camera/image` | `sensor_msgs/Image` | 800×600, `rgb8` (3 bytes per pixel, row by row), frame `ego_vehicle/rgb_front` |
+| `/sensors/front_camera/camera_info` | `sensor_msgs/CameraInfo` | Pinhole intrinsics: fx = fy = 400, cx = 400, cy = 300, no distortion |
+| `/sensors/lidar` | `sensor_msgs/PointCloud2` | ~7–10k points per scan on CARLA (it drops some by default); fields `x, y, z, intensity` (float32) in meters relative to the lidar, which sits 2.4 m above the road (road ≈ z −2.4), 50 m range; frame `ego_vehicle/lidar` |
+| `/carla/ego_vehicle/odometry` | `nav_msgs/Odometry` | Ground-truth pose in `map` and velocity in the car's frame |
+
+Camera and lidar from the same tick carry the same `header.stamp`; match them on it.
+
+Minimal subscriber (save as `my_perception.py`, run with `python3 my_perception.py` after sourcing ROS):
+
+```python
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from rclpy.parameter import Parameter
+from sensor_msgs.msg import Image, PointCloud2
+from sensor_msgs_py import point_cloud2
+
+
+class MyPerception(Node):
+    def __init__(self):
+        super().__init__("my_perception",
+                         parameter_overrides=[Parameter("use_sim_time", Parameter.Type.BOOL, True)])
+        self.create_subscription(Image, "/sensors/front_camera/image", self.on_image, 10)
+        self.create_subscription(PointCloud2, "/sensors/lidar", self.on_lidar, 10)
+
+    def on_image(self, msg: Image):
+        rgb = np.frombuffer(msg.data, np.uint8).reshape(msg.height, msg.width, 3)   # 600 x 800 x 3
+        self.get_logger().info(f"image {rgb.shape} at t={msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}")
+
+    def on_lidar(self, msg: PointCloud2):
+        pts = point_cloud2.read_points_numpy(msg, field_names=("x", "y", "z", "intensity"))  # N x 4
+        self.get_logger().info(f"lidar {len(pts)} points")
+
+
+rclpy.init()
+rclpy.spin(MyPerception())
+```
+
+For the camera image and lidar scan of the same tick in one callback, use `message_filters`:
+
+```python
+from message_filters import Subscriber, TimeSynchronizer
+sync = TimeSynchronizer([Subscriber(self, Image, "/sensors/front_camera/image"),
+                         Subscriber(self, PointCloud2, "/sensors/lidar")], queue_size=10)
+sync.registerCallback(self.on_frame)          # def on_frame(self, image, cloud): ...
+```
+
+Check it from the command line:
+
+```bash
+ros2 topic hz /sensors/lidar                                      # ~20 Hz of sim time
+ros2 topic echo /sensors/front_camera/image --once --no-arr       # 800, 600, rgb8
+ros2 run fake_carla check_sensors --min-hz 5 --save ~/front.png   # OK/FAIL for all three + a snapshot
+```
+
+**Saving data instead of using it live:** record a bag of the raw topics while the sim runs, then
+replay it later without CARLA (`ros2 bag play <bag> --clock`):
+
+```bash
+ros2 bag record -o run1 /clock /tf /tf_static /carla/ego_vehicle/odometry \
+    /carla/ego_vehicle/rgb_front/image /carla/ego_vehicle/rgb_front/camera_info /carla/ego_vehicle/lidar
+```
+
+About 2 GB per minute. Record the raw `/carla/...` topics, not `/sensors/...`, so the recording can
+be re-processed through `sensors_node` later.
+
+### Endpoint 2: driving commands in
+
+| Topic | Type | Direction | Who |
+|---|---|---|---|
+| `/planning/target` | `controls_msgs/ControlTarget` | you publish, 20 Hz | planning |
+| `/perception/obstacle_distance` | `sensor_msgs/Range` | you publish, 20 Hz | perception |
+| `/controls/emergency_stop` | `std_msgs/Bool` | you publish when needed | anyone |
+| `/controls/status` | `controls_msgs/ControlStatus` | you subscribe | anyone |
+
+`ControlTarget` (`controls_msgs/msg/ControlTarget.msg`):
+
+| Field | Meaning |
+|---|---|
+| `header.stamp` | **sim time** (copy it from the odometry message you're answering) |
+| `desired_speed` | m/s; ≤ 0.1 means stop |
+| `target_x`, `target_y` | the point to drive toward, in `map` |
+| `has_target_yaw`, `target_yaw` | optional heading in radians; `false` = aim at the point |
+| `brake_request` | `true` = stop now |
+
+`Range` on `/perception/obstacle_distance`: set `header.stamp` (sim time) and `range` = gap in
+meters from **our front bumper** to the nearest thing in our lane, or `math.inf` if the lane is
+clear. Controls stops under 5 m.
+
+**Controls only drives when both a target and an obstacle range have arrived, stamped with sim
+time, at most 0.5 s old.** Otherwise it brakes and reports `stop_reason: missing_data` on
+`/controls/status`. Stop reasons, in priority order: `emergency_stop`, `missing_data`, `obstacle`,
+`target_speed_zero`; empty = driving.
+
+Minimal planner + perception stand-in (drives toward a point 20 m ahead; the lane is reported
+clear):
+
+```python
+import math
+import rclpy
+from controls_msgs.msg import ControlTarget
+from nav_msgs.msg import Odometry
+from rclpy.node import Node
+from rclpy.parameter import Parameter
+from sensor_msgs.msg import Range
+
+
+class MyPlanner(Node):
+    def __init__(self):
+        super().__init__("my_planner",
+                         parameter_overrides=[Parameter("use_sim_time", Parameter.Type.BOOL, True)])
+        self.target_pub = self.create_publisher(ControlTarget, "/planning/target", 10)
+        self.range_pub = self.create_publisher(Range, "/perception/obstacle_distance", 10)
+        self.create_subscription(Odometry, "/carla/ego_vehicle/odometry", self.on_odometry, 10)
+
+    def on_odometry(self, odom: Odometry):        # once per sim tick
+        p, q = odom.pose.pose.position, odom.pose.pose.orientation
+        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+
+        target = ControlTarget()
+        target.header.stamp = odom.header.stamp   # sim time
+        target.header.frame_id = "map"
+        target.desired_speed = 5.0
+        target.target_x = p.x + 20.0 * math.cos(yaw)
+        target.target_y = p.y + 20.0 * math.sin(yaw)
+        self.target_pub.publish(target)
+
+        clear = Range()
+        clear.header.stamp = odom.header.stamp
+        clear.header.frame_id = "ego_vehicle"
+        clear.range = math.inf                    # a real perception node puts the measured gap here
+        self.range_pub.publish(clear)
+
+
+rclpy.init()
+rclpy.spin(MyPlanner())
+```
+
+This example never stops on its own (the target keeps moving ahead); Ctrl-C it and the car brakes
+within 0.5 s. For a ready-made test that drives to a fixed goal, stops, uses the lidar for
+obstacles and prints PASS/FAIL, run `ros2 run fake_carla drive_test` (see
+[fake_carla/README.md](fake_carla/README.md)).
+
+Check it from the command line:
+
+```bash
+ros2 topic echo /controls/status                     # throttle / brake / steer and stop_reason, every tick
+ros2 topic info /planning/target -v                  # your node as publisher, "controls" as subscriber
+ros2 topic pub --once /controls/emergency_stop std_msgs/msg/Bool "{data: true}"    # stop the car
+ros2 topic pub --once /controls/emergency_stop std_msgs/msg/Bool "{data: false}"   # release
+```
+
+Plain `ros2 topic pub` on `/planning/target` doesn't work: it stamps with wall-clock time, so
+controls treats every target as stale.
+
+### Using it from your own repo
+
+1. **Package dependencies:** reading sensors needs only standard packages (`rclpy`, `sensor_msgs`,
+   `sensor_msgs_py`, `nav_msgs`). Publishing targets also needs `<depend>controls_msgs</depend>` in
+   your `package.xml`. A plain Python script with no package works too.
+2. **On the sim box,** build your code as its own workspace on top of this one (an overlay), so you
+   never edit the shared one:
+   ```bash
+   mkdir -p ~/ws_<name>/src                                    # once
+   # from your laptop: rsync -av --delete --exclude .git ./ carla-sim:~/ws_<name>/src/<your_repo>/
+   cd ~/ws_<name> && colcon build && source install/setup.bash   # ~/ros2_ws is already sourced
+   ```
+3. **Start the pipeline** (one person at a time; `ros2 node list | grep carla_ros_bridge` must be
+   empty first):
+   ```bash
+   ros2 launch carla_controls sim.launch.py                                          # driving
+   ros2 launch carla_controls sim.launch.py controls:=false wait_for_control:=False  # sensors only
+   ```
+4. **Run your node** in a second terminal: `ros2 run <your_pkg> <your_node>` or `python3 my_node.py`.
+5. **Without the sim box:** the same topics come from the fake bridge in Docker on a laptop (see
+   [Testing without CARLA](#testing-without-carla)), so the same code runs against both.
+
+Keep your files in `~/ws_<name>` and recordings in `~/bags/<name>`; don't change `~/ros2_ws` or
+`~/carla_ros_ws`.
+
 ## Layout
 
-This repo holds three ROS 2 packages, plus `fake_carla` for testing without the simulator. Clone it into your workspace's `src/` folder.
+This repo holds three ROS 2 packages, plus `fake_carla` for testing. Clone it into your workspace's `src/` folder.
 
 | Path | What it is |
 |---|---|
@@ -42,10 +246,11 @@ This repo holds three ROS 2 packages, plus `fake_carla` for testing without the 
 | `carla_sensors/carla_sensors/sensors_node.py` | Republishes camera + lidar on `/sensors/*`; warns when a sensor goes quiet |
 | `carla_sensors/carla_sensors/processing.py` | Camera conversion, lidar filter, health watchdog (plain numpy, no ROS) |
 | `carla_sensors/config/sensors_params.yaml` | Sensors node settings: camera encoding, lidar filter, timeout |
-| `carla_sensors/test/test_processing.py` | Unit tests: `cd carla_sensors && python3 -m pytest test/` |
-| `fake_carla/` | Fake CARLA bridge + `check_sensors` tool, for running everything without CARLA ([README](fake_carla/README.md)) |
-| `docker/` | Runs the fake bridge + our nodes in Docker on a laptop (`./docker/fake_sim.sh`) |
 | `carla_sensors/launch/sensors.launch.py` | Starts the sensors node on sim time |
+| `carla_sensors/test/test_processing.py` | Unit tests: `cd carla_sensors && python3 -m pytest test/` |
+| `carla_controls/test/` | Controller unit tests: `cd carla_controls && python3 -m pytest test/` |
+| `fake_carla/` | Fake CARLA bridge, `check_sensors` and `drive_test` tools, for testing with or without CARLA ([README](fake_carla/README.md)) |
+| `docker/` | Runs the fake bridge + our nodes in Docker on a laptop (`./docker/fake_sim.sh`) |
 
 In `carla_controls`, only `controls_node.py` imports ROS. The rest is plain Python.
 
@@ -121,9 +326,8 @@ if you need them (sensor types are listed in the CARLA ros-bridge docs). Ways to
 - **In a node:** subscribe like `sensors_node.py` does, launch with `use_sim_time: True`, and
   convert images with `cv_bridge` (`CvBridge().imgmsg_to_cv2(msg, "rgb8")`) or
   `np.frombuffer(msg.data, np.uint8).reshape(msg.height, msg.width, 3)`.
-- **Record and copy off the box:**
-  `ros2 bag record -o run1 /sensors/front_camera/image /sensors/lidar /carla/ego_vehicle/odometry /controls/status`,
-  then on your laptop `scp -r carla-sim:~/run1 .`
+- **Record and copy off the box:** see [saving data](#endpoint-1-sensor-data-out) above, then on
+  your laptop `scp -r carla-sim:~/run1 .`
 
 To change the rig (resolution, mounting, more sensors), edit `carla_sensors/config/objects.json` and
 rebuild `carla_sensors`. Keep the `odometry` pseudo-sensor: controls depends on it.
